@@ -1,11 +1,5 @@
 # ReadNest: The Read Later App
 
-## 🚀 Live Application
-
-**Try ReadNest now**: **[http://138.197.27.122](http://138.197.27.122)**
-
-*Deployed on Digital Ocean with Docker containerization and continuous deployment*
-
 ## Product Vision Statement
 
 In the current internet age there is a incomprehensible and immense amount of interesting content to peruse yet theres little time to read or consume in the moment upon encountering something new to read, and its liable to be forgotten. **ReadNest** is a mobile web app that can be used to save articles, podcasts, youtube videos to be resurfaced for later (optional offline) reading and annotating.
