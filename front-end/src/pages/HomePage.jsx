@@ -1,0 +1,592 @@
+/**
+ * HomePage.jsx
+ * 
+ * Description: Main landing page with tabbed view of workflow queues
+ * Purpose: Central hub displaying articles in different workflow statuses via tabs
+ * Features:
+ *  - Four-tab view: Inbox, Daily Reading, Continue Reading, Rediscovery
+ *  - Tab-based filtering that auto-applies status filters
+ *  - Search within active tab view
+ *  - Save searches as Stacks
+ */
+
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { Inbox, Calendar, BookOpen, RotateCcw } from "lucide-react";
+import MainLayout from "../components/MainLayout.jsx";
+import SaveStackModal from "../components/SaveStackModal.jsx";
+import TagManagerModal from "../components/TagManagerModal.jsx";
+import ConfirmDeleteModal from "../components/ConfirmDeleteModal.jsx";
+import ArticleCard from "../components/ArticleCard.jsx";
+import { Skeleton } from "../components/ui/skeleton.jsx";
+import { articlesAPI, tagsAPI } from "../services/api.js";
+import { STATUS } from "../constants/statuses.js";
+import applyFiltersAndSort from "../utils/searchUtils.js";
+import { useTagResolution } from "../hooks/useTagResolution.js";
+import { ensureTagsLoaded } from "../utils/tagsCache.js";
+import { useStacks } from "../contexts/useStacks.js";
+
+// Tab configuration with icons and status mapping
+const tabs = [
+  { name: "Inbox", icon: Inbox, status: STATUS.INBOX },
+  { name: "Daily Reading", icon: Calendar, status: STATUS.DAILY },
+  { name: "Continue Reading", icon: BookOpen, status: STATUS.CONTINUE },
+  { name: "Rediscovery", icon: RotateCcw, status: STATUS.REDISCOVERY }
+];
+
+const HomePage = ({ onNavigate, setPageRefresh }) => {
+  const [articles, setArticles] = useState([]);
+  const [rawArticles, setRawArticles] = useState([]); // Store raw articles
+  const [showSaveStackModal, setShowSaveStackModal] = useState(false);
+  const [showTagManagerModal, setShowTagManagerModal] = useState(false);
+  const [showConfirmDeleteModal, setShowConfirmDeleteModal] = useState(false);
+  const [selectedArticleForTags, setSelectedArticleForTags] = useState(null);
+  const [articleToDelete, setArticleToDelete] = useState(null);
+  const [currentFilters, setCurrentFilters] = useState(null);
+  const [activeTab, setActiveTab] = useState("Inbox");
+  const [displayedArticles, setDisplayedArticles] = useState([]);
+  const [availableTags, setAvailableTags] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Use tag resolution hook
+  const { resolveArticleTags, refreshTags } = useTagResolution();
+  
+  // Use stacks hook
+  const { addStack } = useStacks();
+
+  // Get current tab's status value
+  const currentStatus = tabs.find(t => t.name === activeTab)?.status || STATUS.INBOX;
+
+  // Base locked filters based on active tab
+  const baseLockedFilters = useMemo(() => ({ status: currentStatus }), [currentStatus]);
+
+  // Define fetchData function with useCallback to prevent infinite re-renders
+  const fetchData = useCallback(async () => {
+    try {
+      // console.log('HomePage: fetchData called, loading data...');
+      setLoading(true);
+      setError(null);
+
+      // Step 1: Load tags first so resolution never flashes IDs
+      const tagsResponse = await tagsAPI.getAll({ sort: 'alphabetical' });
+      if (tagsResponse.success && tagsResponse.data) {
+        setAvailableTags(tagsResponse.data);
+        // Preload cache for downstream components
+        await ensureTagsLoaded(async () => ({ data: tagsResponse.data }));
+      }
+
+      // Step 2: Fetch articles after tags ready
+      const articlesResponse = await articlesAPI.getAll({});
+      let articlesData = articlesResponse;
+      if (Array.isArray(articlesResponse)) {
+        articlesData = articlesResponse;
+      } else if (articlesResponse.data) {
+        articlesData = articlesResponse.data;
+      } else if (articlesResponse.articles) {
+        articlesData = articlesResponse.articles;
+      }
+      setRawArticles(articlesData);
+
+      setLoading(false);
+    } catch (err) {
+      setError(err.message || "Failed to load data");
+      setLoading(false);
+    }
+  }, []);
+
+  // Fetch articles and tags from backend on mount
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  // Register refresh function with parent component
+  useEffect(() => {
+    if (setPageRefresh) {
+      // console.log('HomePage: Registering refresh function');
+      setPageRefresh(fetchData);
+    }
+    
+    // Cleanup: remove refresh function when component unmounts
+    return () => {
+      if (setPageRefresh) {
+        // console.log('HomePage: Cleaning up refresh function');
+        setPageRefresh(null);
+      }
+    };
+  }, [setPageRefresh, fetchData]);
+
+  // Resolve tags when raw articles or tag resolution function changes
+  useEffect(() => {
+    if (rawArticles.length > 0) {
+      const resolvedArticles = resolveArticleTags(rawArticles);
+      setArticles(resolvedArticles);
+      setDisplayedArticles(applyFiltersAndSort(resolvedArticles, baseLockedFilters));
+    }
+  }, [rawArticles, resolveArticleTags, baseLockedFilters]);
+
+  // Update displayed articles when tab or articles change
+  useEffect(() => {
+    setDisplayedArticles(applyFiltersAndSort(articles, baseLockedFilters));
+  }, [articles, baseLockedFilters]);
+
+  // Get article counts for display
+  // Removed unused articleCounts (was causing lint warning). Re-add if needed for tab badges.
+
+  // Article management functions
+  const handleArticleClick = (article) => {
+    // Navigate to the appropriate viewer based on media type
+    console.log('handleArticleClick - article:', article);
+    console.log('handleArticleClick - mediaType:', article.mediaType);
+    console.log('handleArticleClick - videoId:', article.videoId);
+    const destination = article.mediaType === 'video' ? 'video-player' : article.mediaType === 'audio' ? 'audio-player' : 'text-reader';
+    console.log('handleArticleClick - destination:', destination);
+    onNavigate && onNavigate(destination, { article, returnTo: 'home' });
+  };
+
+  // The following handlers would need to call backend APIs for full integration
+  const handleToggleFavorite = async (articleId) => {
+    try {
+      // Find the current article to get its favorite status
+      const currentArticle = articles.find(article => article.id === articleId);
+      if (!currentArticle) {
+        console.error('Article not found:', articleId);
+        return;
+      }
+
+      console.log('Toggling favorite for article:', articleId, 'from', currentArticle.isFavorite, 'to', !currentArticle.isFavorite);
+
+      // Call the API to toggle favorite status
+      const response = await articlesAPI.toggleFavorite(articleId, !currentArticle.isFavorite);
+      
+      console.log('API response:', response);
+      
+      if (response.success) {
+        console.log('API success, refetching articles...');
+        // Refetch all articles to get the updated state
+        const articlesResponse = await articlesAPI.getAll(currentFilters || {});
+        if (articlesResponse.success) {
+          setRawArticles(articlesResponse.data);
+        }
+      } else {
+        console.error('API response indicated failure:', response);
+      }
+    } catch (error) {
+      console.error('Failed to toggle favorite:', error);
+      // TODO: Show error message to user
+    }
+  };
+
+  const handleStatusChange = async (articleId, newStatus) => {
+    try {
+      const response = await articlesAPI.updateStatus(articleId, newStatus);
+      if (response.success) {
+        // Optimistically update the local state
+        setRawArticles(prev => prev.map(article => 
+          article.id === articleId 
+            ? { ...article, status: newStatus }
+            : article
+        ));
+      } else {
+        throw new Error(response.error || 'Failed to update status');
+      }
+    } catch (error) {
+      console.error('Failed to update article status:', error);
+      alert(`Failed to update status: ${error.message}`);
+    }
+  };
+
+  const handleDeleteArticle = (articleId) => {
+    // Find the article to show its title in the confirmation modal
+    const article = rawArticles.find(a => a.id === articleId);
+    setArticleToDelete(article);
+    setShowConfirmDeleteModal(true);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!articleToDelete) return;
+
+    try {
+      // Optimistically update the UI immediately
+      setRawArticles(prev => prev.filter(article => article.id !== articleToDelete.id));
+      
+      // Call the backend API
+      const response = await articlesAPI.delete(articleToDelete.id);
+      
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to delete article');
+      }
+      
+      console.log('Article deleted successfully');
+    } catch (error) {
+      console.error('Failed to delete article:', error);
+      
+      // Revert the optimistic update on error by refetching data
+      try {
+        const articlesResponse = await articlesAPI.getAll();
+        let articlesData = articlesResponse;
+        if (Array.isArray(articlesResponse)) {
+          articlesData = articlesResponse;
+        } else if (articlesResponse.data) {
+          articlesData = articlesResponse.data;
+        } else if (articlesResponse.articles) {
+          articlesData = articlesResponse.articles;
+        }
+        setRawArticles(articlesData);
+      } catch (fetchError) {
+        console.error('Failed to refetch articles:', fetchError);
+      }
+      
+      alert(`Failed to delete article: ${error.message}`);
+    }
+  };
+
+  const handleSearchWithFilters = (query, filters) => {
+    // Merge locked filters (status) with search filters
+    const merged = { ...baseLockedFilters, ...(filters || {}), query };
+    setCurrentFilters(merged);
+    setDisplayedArticles(applyFiltersAndSort(articles, merged));
+  };
+
+  const handleSaveSearch = () => {
+    setShowSaveStackModal(true);
+  };
+
+  const handleSaveStack = async (stackData) => {
+    try {
+      await addStack(stackData);
+      alert(`Stack "${stackData.name}" saved successfully!`);
+      setShowSaveStackModal(false);
+    } catch (error) {
+      console.error('Error saving stack:', error);
+      alert('Failed to save stack');
+    }
+  };
+
+  // Handler for when the locked filter chip is removed - navigate to search page
+  const handleFilterChipRemoved = () => {
+    onNavigate('search');
+  };
+
+  const handleManageTags = (article) => {
+    // Find the raw article (with tag IDs) instead of using the resolved article (with tag names)  
+    const rawArticle = rawArticles.find(raw => raw.id === article.id);
+    setSelectedArticleForTags(rawArticle || article);
+    setShowTagManagerModal(true);
+  };
+
+  const handleAddTag = async (articleId, tagId) => {
+    try {
+      // Check if tag is already on article before making API call
+      const currentArticle = rawArticles.find(a => a.id === articleId);
+      const tagAlreadyExists = currentArticle?.tags?.some(t => 
+        String(t).toLowerCase() === String(tagId).toLowerCase()
+      );
+      
+      if (tagAlreadyExists) {
+        console.log('Tag already on article, skipping API call');
+        return; // Silently succeed - tag is already attached
+      }
+      // Perform API call to attach tag
+      const response = await articlesAPI.addTag(articleId, tagId);
+      if (!response.success) throw new Error(response.error || 'Failed to add tag');
+
+      // Optimistically update rawArticles locally (avoid full refetch for responsiveness)
+      setRawArticles(prev => {
+        const updated = prev.map(a => {
+          if (a.id !== articleId) return a;
+          const existing = Array.isArray(a.tags) ? a.tags : [];
+          if (existing.some(t => String(t).toLowerCase() === String(tagId).toLowerCase())) return a;
+          return { ...a, tags: [...existing, tagId] };
+        });
+        return updated;
+      });
+
+      // Update resolved articles & displayedArticles immediately
+      const nextRaw = rawArticles.map(a => {
+        if (a.id !== articleId) return a;
+        const existing = Array.isArray(a.tags) ? a.tags : [];
+        if (existing.some(t => String(t).toLowerCase() === String(tagId).toLowerCase())) return a;
+        return { ...a, tags: [...existing, tagId] };
+      });
+      const resolved = resolveArticleTags(nextRaw);
+      setArticles(resolved);
+      setDisplayedArticles(applyFiltersAndSort(resolved, baseLockedFilters));
+
+      // Update selected article for tag modal (use raw article with tag IDs, not resolved)
+      if (selectedArticleForTags && selectedArticleForTags.id === articleId) {
+        const updatedRaw = nextRaw.find(a => a.id === articleId);
+        if (updatedRaw) {
+          setSelectedArticleForTags(updatedRaw);
+        }
+      }
+    } catch (error) {
+      // If tag is already on article (409), treat as success
+      const errorMsg = String(error?.message || '').toLowerCase();
+      if (errorMsg.includes('already on article')) {
+        console.log('Tag already on article (409), treating as success');
+        // Refetch to sync state
+        const articlesResponse = await articlesAPI.getAll({});
+        if (articlesResponse.data) {
+          setRawArticles(articlesResponse.data);
+          const updatedArticle = articlesResponse.data.find(a => a.id === articleId);
+          if (updatedArticle) {
+            setSelectedArticleForTags(updatedArticle);
+          }
+        }
+        return; // Don't show error to user
+      }
+      
+      console.error('Failed to add tag:', error);
+      alert(`Failed to add tag: ${error.message}`);
+    }
+  };
+
+  const handleRemoveTag = async (articleId, tagId) => {
+    try {
+      const response = await articlesAPI.removeTag(articleId, tagId);
+      if (!response.success) throw new Error(response.error || 'Failed to remove tag');
+
+      // Optimistically update rawArticles by removing tagId (handle both id and name forms)
+      setRawArticles(prev => prev.map(a => {
+        if (a.id !== articleId) return a;
+        const existing = Array.isArray(a.tags) ? a.tags : [];
+        const filtered = existing.filter(t => {
+          const s = String(t).toLowerCase();
+          const target = String(tagId).toLowerCase();
+          return s !== target; // if tags are names OR ids
+        });
+        return { ...a, tags: filtered };
+      }));
+
+      const nextRaw = rawArticles.map(a => {
+        if (a.id !== articleId) return a;
+        const existing = Array.isArray(a.tags) ? a.tags : [];
+        const filtered = existing.filter(t => String(t).toLowerCase() !== String(tagId).toLowerCase());
+        return { ...a, tags: filtered };
+      });
+      const resolved = resolveArticleTags(nextRaw);
+      setArticles(resolved);
+      setDisplayedArticles(applyFiltersAndSort(resolved, baseLockedFilters));
+
+      if (selectedArticleForTags && selectedArticleForTags.id === articleId) {
+        const updatedRaw = nextRaw.find(a => a.id === articleId);
+        if (updatedRaw) {
+          const [resolvedArticle] = resolveArticleTags([updatedRaw]);
+          setSelectedArticleForTags(resolvedArticle);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to remove tag:', error);
+      alert(`Failed to remove tag: ${error.message}`);
+    }
+  };
+
+  const handleCreateTag = async (tagName) => {
+    try {
+      if (!selectedArticleForTags) {
+        throw new Error('No article selected');
+      }
+
+      // 1. Check if tag already exists
+      let existingTag = availableTags.find(t => 
+        t.name.toLowerCase() === tagName.toLowerCase()
+      );
+
+      let tagId;
+      if (existingTag) {
+        tagId = existingTag.id;
+      } else {
+        // 2. Create new tag via API
+        const createResponse = await tagsAPI.create({ name: tagName });
+        if (!createResponse.success || !createResponse.data) {
+          throw new Error('Failed to create tag');
+        }
+        existingTag = createResponse.data;
+        tagId = existingTag.id;
+        setAvailableTags(prev => [...prev, existingTag]);
+      }
+
+      // Refresh tags to update the tag resolution mapping
+      await refreshTags();
+
+      // 3. Add tag to article via API
+      const addResponse = await articlesAPI.addTag(selectedArticleForTags.id, tagId);
+      if (!addResponse.success) {
+        throw new Error(addResponse.error || 'Failed to add tag to article');
+      }
+
+      // 4. Update rawArticles state immediately for UI responsiveness
+      setRawArticles(prev => prev.map(article => 
+        article.id === selectedArticleForTags.id 
+          ? { ...article, tags: [...(article.tags || []), tagId] }
+          : article
+      ));
+
+      // 5. Update resolved articles state
+      const nextRaw = rawArticles.map(article => 
+        article.id === selectedArticleForTags.id 
+          ? { ...article, tags: [...(article.tags || []), tagId] }
+          : article
+      );
+      const resolved = resolveArticleTags(nextRaw);
+      setArticles(resolved);
+      setDisplayedArticles(applyFiltersAndSort(resolved, baseLockedFilters));
+
+      // 6. Update selected article for modal with fresh tag
+      setSelectedArticleForTags(prev => ({
+        ...prev,
+        tags: [...(prev.tags || []), tagId]
+      }));
+
+      // 7. Return the created/existing tag for the modal
+      return existingTag;
+
+    } catch (error) {
+      console.error('Failed to create/add tag:', error);
+      const errorMsg = String(error?.message || 'Unknown error');
+      if (!errorMsg.toLowerCase().includes('already')) {
+        alert(`Failed to create tag: ${errorMsg}`);
+      }
+      throw error; // Re-throw so modal can handle it
+    }
+  };
+
+  return (
+    <MainLayout
+      currentPage="home"
+      currentView={activeTab}
+      onNavigate={onNavigate}
+      articles={displayedArticles}
+      useAdvancedSearch={true}
+      onSearchWithFilters={handleSearchWithFilters}
+      onSaveSearch={handleSaveSearch}
+      availableTags={["Development", "Design", "AI", "Technology"]}
+      lockedFilters={baseLockedFilters}
+      preAppliedFilters={baseLockedFilters}
+      onFilterChipRemoved={handleFilterChipRemoved}
+      showTimeFilter={true}
+      showMediaFilter={true}
+      showTagFilter={true}
+      showFavoritesFilter={true}
+      showAnnotationsFilter={true}
+      showSortOptions={true}
+    >
+      <div className="p-4 md:p-6">
+        <div className="max-w-7xl mx-auto">
+          <div className="mb-6">
+            <h1 className="text-2xl md:text-3xl font-bold mb-2">Welcome back</h1>
+            <p className="text-muted-foreground">Here's your reading overview</p>
+          </div>
+          {/* Tab Navigation */}
+          <div className="border-b border-border mb-6">
+            <div className="flex">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.name}
+                  onClick={() => setActiveTab(tab.name)}
+                  className={`flex-1 flex flex-col sm:flex-row items-center justify-center gap-1.5 sm:gap-2 px-3 py-3 text-xs sm:text-sm font-medium transition-colors border-b-2 ${
+                    activeTab === tab.name
+                      ? "border-primary text-primary"
+                      : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                  }`}
+                >
+                  <tab.icon size={16} className="shrink-0" />
+                  <span className="hidden sm:inline">{tab.name}</span>
+                  <span className="sm:hidden text-[11px] leading-tight text-center">
+                    {tab.name === "Daily Reading" ? "Daily" : 
+                     tab.name === "Continue Reading" ? "Continue" : 
+                     tab.name}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* Tab Content */}
+          <div className="min-h-[400px]">
+            {loading ? (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {[...Array(6)].map((_, i) => (
+                  <div key={i} className="border border-border rounded-lg p-4 space-y-3">
+                    <div className="flex justify-between items-start">
+                      <Skeleton className="h-4 w-3/4" />
+                      <Skeleton className="h-8 w-8 rounded-full" />
+                    </div>
+                    <Skeleton className="h-4 w-full" />
+                    <div className="flex gap-2">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-3 w-16" />
+                    </div>
+                    <div className="flex gap-2">
+                      <Skeleton className="h-5 w-16 rounded" />
+                      <Skeleton className="h-5 w-20 rounded" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : error ? (
+              <div className="bg-destructive/10 border border-destructive rounded-lg p-8 text-center">
+                <p className="text-lg font-medium mb-2 text-destructive">{error}</p>
+                <p className="text-sm text-muted-foreground">Could not load articles.</p>
+              </div>
+            ) : displayedArticles.length > 0 ? (
+              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                {displayedArticles.map((article) => (
+                  <ArticleCard
+                    key={article.id}
+                    article={article}
+                    onArticleClick={handleArticleClick}
+                    onToggleFavorite={handleToggleFavorite}
+                    onManageTags={handleManageTags}
+                    onStatusChange={handleStatusChange}
+                    onDelete={handleDeleteArticle}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="bg-card border border-border rounded-lg p-8 text-center">
+                <p className="text-lg font-medium mb-2">{activeTab}</p>
+                <p className="text-sm text-muted-foreground">
+                  {activeTab === "Inbox" && "No new articles waiting to be triaged"}
+                  {activeTab === "Daily Reading" && "No articles scheduled for today's reading session"}
+                  {activeTab === "Continue Reading" && "No articles in progress"}
+                  {activeTab === "Rediscovery" && "No articles scheduled for rediscovery"}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      {/* Save Stack Modal */}
+      <SaveStackModal
+        isOpen={showSaveStackModal}
+        onClose={() => setShowSaveStackModal(false)}
+        onSave={handleSaveStack}
+        currentFilters={currentFilters}
+      />
+      
+      {/* Tag Manager Modal */}
+      <TagManagerModal
+        isOpen={showTagManagerModal}
+        onClose={() => setShowTagManagerModal(false)}
+        article={selectedArticleForTags}
+        availableTags={availableTags}
+        onAddTag={handleAddTag}
+        onRemoveTag={handleRemoveTag}
+        onCreateTag={handleCreateTag}
+      />
+      
+      {/* Confirm Delete Modal */}
+      <ConfirmDeleteModal
+        isOpen={showConfirmDeleteModal}
+        onClose={() => {
+          setShowConfirmDeleteModal(false);
+          setArticleToDelete(null);
+        }}
+        onConfirm={handleConfirmDelete}
+        articleTitle={articleToDelete?.title}
+      />
+    </MainLayout>
+  );
+};
+
+export default HomePage;

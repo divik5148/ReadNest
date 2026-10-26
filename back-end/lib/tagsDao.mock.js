@@ -1,0 +1,346 @@
+/**
+ * Tags Mock DAO - Array-backed implementation
+ * 
+ * Purpose: Provides an in-memory implementation of the tags data access layer
+ * using the mock data from data/mockTags.js. This DAO maintains state in memory
+ * and provides deterministic behavior for testing and development.
+ */
+
+const { mockTags } = require('../data/mockTags');
+
+// Import the articles DAO directly to avoid circular dependency with daoFactory
+// We'll use a lazy getter to ensure articlesDao is loaded after both modules are initialized
+let articlesDaoInstance = null;
+const getArticlesDao = () => {
+  if (!articlesDaoInstance) {
+    // Directly require articlesDao.mock to avoid circular dependency
+    articlesDaoInstance = require('./articlesDao.mock');
+  }
+  return articlesDaoInstance;
+};
+
+// In-memory storage - clone the mock data to avoid mutations
+let tags = [...mockTags.map(tag => ({ ...tag }))];
+
+// Normalize tag names to lowercase and ensure articleCount presence
+tags = tags.map(t => ({
+  ...t,
+  name: String(t.name).toLowerCase(),
+  articleCount: typeof t.articleCount === 'number' ? t.articleCount : 0
+}));
+
+// ID tracking for string-based IDs (compatible with normalized hex format)
+// Validate uniqueness of existing IDs (development safeguard)
+const seenIds = new Set();
+for (const t of tags) {
+  if (seenIds.has(t.id)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[tagsDao] Duplicate seed tag id detected: ${t.id}`);
+  }
+  seenIds.add(t.id);
+}
+
+// For new tags, generate hex-like strings to match normalized format
+let nextNumericId = 1000; // Start well above seed data max
+
+/**
+ * Generate a new ID for created tags (returns hex string matching seed format)
+ */
+const generateId = () => {
+  // Generate a hex string ID
+  let hexId = nextNumericId.toString(16).padStart(24, '0');
+  while (seenIds.has(hexId)) {
+    nextNumericId++;
+    hexId = nextNumericId.toString(16).padStart(24, '0');
+  }
+  seenIds.add(hexId);
+  return hexId;
+};
+
+/**
+ * Calculate the actual article count for a tag using current article state
+ * @param {string} tagId - Tag ID to count articles for
+ * @returns {number} Number of articles with this tag
+ */
+const calculateArticleCount = (tagId) => {
+  try {
+    const articlesDao = getArticlesDao();
+    if (!articlesDao || !articlesDao.getAllArticlesForInternalUse) {
+      // If articlesDao is not available yet, return 0
+      return 0;
+    }
+    const allArticles = articlesDao.getAllArticlesForInternalUse();
+    return allArticles.filter(article => 
+      article.tags && Array.isArray(article.tags) && article.tags.includes(tagId)
+    ).length;
+  } catch (error) {
+    // If there's an error accessing articlesDao, return 0 to avoid breaking tag operations
+    console.warn('Error calculating article count for tag', tagId, ':', error.message);
+    return 0;
+  }
+};
+
+const tagsDao = {
+  /**
+   * Get all tags with optional filtering
+   * @param {Object} filters - Query filters
+   * @param {string} filters.category - Filter by category
+   * @param {string} filters.search - Search in name and description
+   * @returns {Promise<Array>} Array of tags
+   */
+  async getAll(filters = {}) {
+    let filteredTags = [...tags];
+
+    // User filter (CRITICAL: tags must be scoped to authenticated user)
+    if (filters.userId) {
+      filteredTags = filteredTags.filter(tag => tag.userId === filters.userId);
+    }
+
+    // Category filter
+    if (filters.category) {
+      filteredTags = filteredTags.filter(tag => tag.category === filters.category);
+    }
+
+    // Search filter
+    if (filters.search) {
+      const searchLower = filters.search.toLowerCase();
+      filteredTags = filteredTags.filter(tag => 
+        tag.name.toLowerCase().includes(searchLower) ||
+        (tag.description && tag.description.toLowerCase().includes(searchLower))
+      );
+    }
+
+    // Update article counts with actual values
+    filteredTags = filteredTags.map(tag => ({
+      ...tag,
+      articleCount: calculateArticleCount(tag.id)
+    }));
+
+    return filteredTags;
+  },
+
+  /**
+   * Get single tag by ID
+   * @param {string} id - Tag ID
+   * @returns {Promise<Object|null>} Tag object or null if not found
+   */
+  async getById(id) {
+    const tag = tags.find(t => t.id == id);
+    return tag ? { ...tag, articleCount: calculateArticleCount(tag.id) } : null;
+  },
+
+  /**
+   * Get single tag by name
+   * @param {string} name - Tag name
+   * @returns {Promise<Object|null>} Tag object or null if not found
+   */
+  async getByName(name) {
+    const tag = tags.find(t => t.name === String(name).toLowerCase());
+    return tag ? { ...tag, articleCount: calculateArticleCount(tag.id) } : null;
+  },
+
+  /**
+   * Create new tag
+   * @param {Object} tagData - Tag data
+   * @returns {Promise<Object>} Created tag
+   */
+  async create(tagData) {
+    // Check if tag with same name already exists
+    const existingTag = await this.getByName(tagData.name);
+    if (existingTag) {
+      throw new Error(`Tag with name "${tagData.name}" already exists`);
+    }
+
+    const newTag = {
+      ...tagData, // Spread first to get all fields
+      id: generateId(), // numeric ID (override if present in tagData)
+      name: String(tagData.name).toLowerCase(), // Normalize name (override after spread)
+      description: tagData.description || '',
+      category: tagData.category || 'General',
+      color: tagData.color || '#6366f1',
+      articleCount: 0,
+      createdDate: new Date(),
+      lastUsed: new Date()
+    };
+
+    tags.push(newTag);
+    
+    return { ...newTag };
+  },
+
+  /**
+   * Update tag
+   * @param {string} id - Tag ID
+   * @param {Object} updateData - Data to update
+   * @returns {Promise<Object|null>} Updated tag or null if not found
+   */
+  async update(id, updateData) {
+  const index = tags.findIndex(t => t.id == id);
+    if (index === -1) {
+      return null;
+    }
+
+    // Check if updating name and name already exists elsewhere
+    if (updateData.name && updateData.name !== tags[index].name) {
+      const existingTag = await this.getByName(updateData.name);
+      if (existingTag && existingTag.id !== id) {
+        throw new Error(`Tag with name "${updateData.name}" already exists`);
+      }
+    }
+
+    const next = {
+      ...tags[index],
+      ...updateData,
+      name: updateData.name ? String(updateData.name).toLowerCase() : tags[index].name,
+      id // Ensure ID doesn't change
+    };
+    // Recompute articleCount dynamically (will be overridden by getAll anyway)
+    next.articleCount = calculateArticleCount(next.id);
+    next.updatedAt = new Date();
+    tags[index] = next;
+
+    return { ...tags[index] };
+  },
+
+  /**
+   * Delete tag
+   * @param {string} id - Tag ID
+   * @returns {Promise<boolean>} True if deleted, false if not found
+   */
+  async delete(id) {
+    const index = tags.findIndex(t => t.id == id);
+    if (index === -1) {
+      return false;
+    }
+
+    // Remove the tag from the tags list
+    const removed = tags.splice(index, 1)[0];
+    if (removed) {
+      seenIds.delete(String(removed.id));
+      
+      // Remove this tag from all articles
+      const articlesDao = getArticlesDao();
+      const allArticles = articlesDao.getAllArticlesForInternalUse();
+      
+      // Convert id to number for comparison (tags in articles are stored as numbers)
+      const numId = Number(id);
+      const strId = String(id);
+      
+      for (const article of allArticles) {
+        if (article.tags && Array.isArray(article.tags)) {
+          // Check if the article has this tag (using loose equality to handle both string and number)
+          const hasTag = article.tags.some(tagId => tagId == id || tagId == numId || tagId == strId);
+          
+          if (hasTag) {
+            // Remove the tag from this article (filter using loose equality)
+            const updatedTags = article.tags.filter(tagId => tagId != id && tagId != numId && tagId != strId);
+            articlesDao.update(article.id, { tags: updatedTags });
+          }
+        }
+      }
+    }
+    return true;
+  },
+
+  /**
+   * Get tags by category
+   * @param {string} category - Category to filter by
+   * @returns {Promise<Array>} Tags with the specified category
+   */
+  async getByCategory(category) {
+    return tags.filter(tag => tag.category === category);
+  },
+
+  /**
+   * Update tag's article count
+   * @param {string} id - Tag ID
+   * @param {number} count - Article count
+   * @returns {Promise<Object|null>} Updated tag or null if not found
+   */
+  async updateArticleCount(id, count) {
+    return this.update(id, { articleCount: count });
+  },
+
+  /**
+   * Increment tag's article count
+   * @param {string} id - Tag ID
+   * @returns {Promise<Object|null>} Updated tag or null if not found
+   */
+  async incrementArticleCount(id) {
+    const tag = await this.getById(id);
+    if (!tag) return null;
+    return this.update(id, { articleCount: tag.articleCount + 1 });
+  },
+
+  /**
+   * Decrement tag's article count
+   * @param {string} id - Tag ID
+   * @returns {Promise<Object|null>} Updated tag or null if not found
+   */
+  async decrementArticleCount(id) {
+    const tag = await this.getById(id);
+    if (!tag) return null;
+    return this.update(id, { articleCount: Math.max(0, tag.articleCount - 1) });
+  },
+
+  /**
+   * Search tags by name or description
+   * @param {string} query - Search query
+   * @returns {Promise<Array>} Matching tags
+   */
+  async search(query) {
+    if (!query) return [];
+    
+    const queryLower = query.toLowerCase();
+    return tags.filter(tag => 
+      tag.name.toLowerCase().includes(queryLower) ||
+      (tag.description && tag.description.toLowerCase().includes(queryLower))
+    );
+  },
+
+  /**
+   * Get unique categories
+   * @returns {Promise<Array>} Array of unique categories
+   */
+  async getCategories() {
+    const categories = [...new Set(tags.map(tag => tag.category))];
+    return categories.filter(cat => cat); // Remove empty/null categories
+  },
+
+  /**
+   * Get popular tags (by article count)
+   * @param {number} limit - Maximum number of tags to return
+   * @returns {Promise<Array>} Tags sorted by article count (descending)
+   */
+  async getPopular(limit = 10) {
+    const sortedTags = [...tags].sort((a, b) => b.articleCount - a.articleCount);
+    return sortedTags.slice(0, limit);
+  },
+
+  /**
+   * Get tags with no articles
+   * @returns {Promise<Array>} Tags with articleCount of 0
+   */
+  async getUnused() {
+    return tags.filter(tag => tag.articleCount === 0);
+  },
+
+  /**
+   * Reset tags to original mock data (for testing)
+   */
+  reset() {
+    tags = [...mockTags.map(tag => ({ ...tag }))];
+    seenIds.clear();
+    for (const t of tags) seenIds.add(t.id);
+    nextNumericId = 1000; // Reset to start value
+  },
+
+  /**
+   * Get current count (for debugging)
+   */
+  getCount() {
+    return tags.length;
+  }
+};
+
+module.exports = tagsDao;
